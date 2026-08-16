@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "DeepLearning.AI PT-BR Captions",
+  "description": "Traduz automaticamente as legendas do DeepLearning.AI para português do Brasil.",
+  "version": "1.0.0",
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": [
+    "https://learn.deeplearning.ai/*",
+    "https://translate.googleapis.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://learn.deeplearning.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "DeepLearning PT-BR Captions",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "48": "icons/icon_48.png"
+  }
+}
