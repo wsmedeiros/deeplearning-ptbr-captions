@@ -36,7 +36,6 @@ deeplearning-ptbr-extension/
 ├── content.js      # Script principal injetado nas páginas
 ├── popup.html      # Popup ao clicar no ícone da extensão
 ├── icons           # Diretório de ícones
-├── screenshots     # Diretório de screenshots
 └── README.md
 ```
 
