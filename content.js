@@ -2,6 +2,7 @@
   const CACHE = new Map(), INFLIGHT = new Set();
   let cueObs = null, bodyObs = null, currentRoot = null, active = false;
   let prefetchedTrack = null;
+  const MAX_CHARS = 42;
 
   async function translateBatch(lines) {
     try {
@@ -50,28 +51,42 @@
         }
       }
     } catch (e) {}
-  }  
+  }
+  
+  function fixedWrap(text) {
+    if (text.length <= MAX_CHARS) return text;
+    const mid = Math.floor(text.length / 2);
+    let left = text.lastIndexOf(' ', mid);
+    let right = text.indexOf(' ', mid);
+    if (left < 0) left = right;
+    if (right < 0) right = left;
+    const split = (mid - left) <= (right - mid) ? left : right;
+    if (split < 0) return text;
+    return text.slice(0, split) + '\n' + text.slice(split + 1);
+  }
 
   function applyCue(c) {
-    const s = c.textContent.trim().replace(/\n+/g, ' ');
-    if (!s || s === c._pt) return;
+    const key = c.textContent.trim().replace(/\n+/g, ' ');
+    if (!key || key === c._pt) return;
 
-    if (CACHE.has(s)) {
-      c.textContent = CACHE.get(s);
-      c._pt = CACHE.get(s);
+    if (CACHE.has(key)) {
+      const translated = CACHE.get(key);
+      c._pt = translated;
+      c.textContent = fixedWrap(translated);
       return;
     }
 
     c.style.visibility = 'hidden';
-    if (INFLIGHT.has(s)) return;
-    INFLIGHT.add(s);
-    translateBatch([s]).then(() => {
-      INFLIGHT.delete(s);
+    if (INFLIGHT.has(key)) return;
+    INFLIGHT.add(key);
+    translateBatch([key]).then(() => {
+      INFLIGHT.delete(key);
       document.querySelectorAll('[data-part="cue"]').forEach(el => {
-        const t = el.textContent.trim().replace(/\n+/g, ' ');
-        if (t === s && CACHE.has(s)) {
-          el.textContent = CACHE.get(s);
-          el._pt = CACHE.get(s);
+        const k = el.textContent.trim().replace(/\n+/g, ' ');
+        if (k === key && CACHE.has(key)) {
+          const translated = CACHE.get(key);
+          el._pt = translated;
+          el.textContent = fixedWrap(translated);
           el.style.visibility = '';
         }
       });
