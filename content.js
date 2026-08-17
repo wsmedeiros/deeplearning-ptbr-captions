@@ -1,20 +1,36 @@
 (function () {
-  const CACHE = new Map(), INFLIGHT = new Set();
+  // --- State ---
+  const CACHE = new Map();
+  const INFLIGHT = new Set();
+  const CUE_STATE = new WeakMap(); // element -> { original: string, translated: string }
   let cueObs = null, bodyObs = null, currentRoot = null, active = false;
   let prefetchedTrack = null;
-  const SOURCE_LANGUAGE = 'en'
-  const TARGET_LANGUAGE = 'pt-BR'
-  const MAX_CHARS = 42;
 
+  // --- Constants ---
+  const SOURCE_LANGUAGE = 'en';
+  const TARGET_LANGUAGE = 'pt-BR';
+  const MAX_CHARS = 42;
+  const BATCH_SIZE = 10;
+
+  // --- Translation ---
   async function translateBatch(lines) {
     try {
       const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${SOURCE_LANGUAGE}&tl=${TARGET_LANGUAGE}&dt=t&q=${encodeURIComponent(lines.join('\n'))}`;
       const data = await (await fetch(url)).json();
       const results = data[0].reduce((s, c) => s + (c[0] ?? ''), '').split('\n');
       lines.forEach((o, i) => CACHE.set(o, results[i]?.trim() || o));
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[PT-BR] Falha na tradução:', e);
+    }
   }
 
+  async function batchTranslateLines(lines) {
+    const batches = [];
+    for (let i = 0; i < lines.length; i += BATCH_SIZE) batches.push(lines.slice(i, i + BATCH_SIZE));
+    await Promise.allSettled(batches.map(translateBatch));
+  }
+
+  // --- Prefetch strategies ---
   async function prefetchFromTrack() {
     const track = document.querySelector('video track[kind="subtitles"]');
     if (!track?.src || track.src === prefetchedTrack) return;
@@ -30,31 +46,30 @@
           .map(l => l.replace(/<[^>]+>/g, '').replace(/\n+/g, ' ').trim())
           .filter(Boolean)
       )];
-      if (!lines.length) return;
-      const B = 10;
-      const batches = [];
-      for (let i = 0; i < lines.length; i += B) batches.push(lines.slice(i, i + B));
-      await Promise.allSettled(batches.map(translateBatch));
-    } catch (e) {}
+      if (lines.length) await batchTranslateLines(lines);
+    } catch (e) {
+      console.warn('[PT-BR] Falha ao buscar trilha de legendas:', e);
+    }
   }
 
   async function prefetchFromNextData() {
     try {
-      const q = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || '{}')
+      const queries = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || '{}')
         ?.props?.pageProps?.trpcState?.json?.queries ?? [];
-      for (const e of q) {
-        const c = e?.state?.data?.captions;
-        if (Array.isArray(c) && c.length) {
-          const lines = [...new Set(c.map(x => x.text.replace(/\n+/g, ' ').trim()).filter(Boolean))];
-          const B = 10, batches = [];
-          for (let i = 0; i < lines.length; i += B) batches.push(lines.slice(i, i + B));
-          await Promise.allSettled(batches.map(translateBatch));
+      for (const entry of queries) {
+        const captions = entry?.state?.data?.captions;
+        if (Array.isArray(captions) && captions.length) {
+          const lines = [...new Set(captions.map(x => x.text.replace(/\n+/g, ' ').trim()).filter(Boolean))];
+          await batchTranslateLines(lines);
           return;
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[PT-BR] Falha ao ler __NEXT_DATA__:', e);
+    }
   }
-  
+
+  // --- DOM helpers ---
   function fixedWrap(text) {
     if (text.length <= MAX_CHARS) return text;
     const mid = Math.floor(text.length / 2);
@@ -68,12 +83,19 @@
   }
 
   function applyCue(c) {
-    const key = c.textContent.trim().replace(/\n+/g, ' ');
-    if (!key || key === c._pt) return;
+    const text = c.textContent.trim().replace(/\n+/g, ' ');
+    if (!text) return;
+
+    const state = CUE_STATE.get(c);
+    if (state?.translated === text) return;
+
+    if (state) CUE_STATE.delete(c);
+
+    const key = text;
 
     if (CACHE.has(key)) {
       const translated = CACHE.get(key);
-      c._pt = translated;
+      CUE_STATE.set(c, { original: key, translated });
       c.textContent = fixedWrap(translated);
       return;
     }
@@ -81,13 +103,14 @@
     c.style.visibility = 'hidden';
     if (INFLIGHT.has(key)) return;
     INFLIGHT.add(key);
+
     translateBatch([key]).then(() => {
       INFLIGHT.delete(key);
       document.querySelectorAll('[data-part="cue"]').forEach(el => {
-        const k = el.textContent.trim().replace(/\n+/g, ' ');
-        if (k === key && CACHE.has(key)) {
+        const elText = el.textContent.trim().replace(/\n+/g, ' ');
+        if (elText === key && CACHE.has(key)) {
           const translated = CACHE.get(key);
-          el._pt = translated;
+          CUE_STATE.set(el, { original: key, translated });
           el.textContent = fixedWrap(translated);
           el.style.visibility = '';
         }
@@ -95,18 +118,22 @@
     });
   }
 
+  // --- Observers ---
   function attachObserver(root) {
     if (root === currentRoot) return;
     cueObs?.disconnect();
     currentRoot = root;
-    cueObs = new MutationObserver(ms => {
+    cueObs = new MutationObserver(mutations => {
       const seen = new Set();
-      for (const { addedNodes: a, target: t } of ms) [t, ...a].forEach(n => {
-        if (n.nodeType !== 1) n = n.parentElement;
-        if (!n) return;
-        (n.matches('[data-part="cue"]') ? [n] : [...n.querySelectorAll('[data-part="cue"]')])
-          .filter(c => !seen.has(c) && seen.add(c)).forEach(applyCue);
-      });
+      for (const { addedNodes, target } of mutations) {
+        [target, ...addedNodes].forEach(node => {
+          if (node.nodeType !== 1) node = node.parentElement;
+          if (!node) return;
+          (node.matches('[data-part="cue"]') ? [node] : [...node.querySelectorAll('[data-part="cue"]')])
+            .filter(c => !seen.has(c) && seen.add(c))
+            .forEach(applyCue);
+        });
+      }
     });
     cueObs.observe(root, { childList: true, subtree: true });
     root.querySelectorAll('[data-part="cue"]').forEach(applyCue);
@@ -115,13 +142,12 @@
   function watchForTrackChanges() {
     new MutationObserver(() => {
       const track = document.querySelector('video track[kind="subtitles"]');
-      if (track?.src && track.src !== prefetchedTrack) {
-        prefetchedTrack = track.src;
-        prefetchFromTrack();
-      }
+      // Let prefetchFromTrack manage its own guard via prefetchedTrack
+      if (track?.src && track.src !== prefetchedTrack) prefetchFromTrack();
     }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
   }
 
+  // --- Lifecycle ---
   async function activate() {
     if (active) return;
     active = true;
@@ -134,9 +160,7 @@
 
     bodyObs = new MutationObserver(() => {
       const r = document.querySelector('.vds-captions');
-      if (r && r !== currentRoot) {
-        prefetchFromTrack().then(() => attachObserver(r));
-      }
+      if (r && r !== currentRoot) prefetchFromTrack().then(() => attachObserver(r));
     });
     bodyObs.observe(document.body, { childList: true, subtree: true });
 
@@ -169,11 +193,16 @@
 
     document.querySelectorAll('[data-part="cue"]').forEach(c => {
       c.style.visibility = '';
-      if (c._pt) { c.textContent = c._pt; c._pt = null; }
+      const state = CUE_STATE.get(c);
+      if (state) {
+        c.textContent = state.original;
+        CUE_STATE.delete(c);
+      }
     });
     console.log('[PT-BR Caption Translator] desativado');
   }
 
+  // --- Message listener ---
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.action === 'activate') {
       activate().then(() => sendResponse({ ok: true }));
