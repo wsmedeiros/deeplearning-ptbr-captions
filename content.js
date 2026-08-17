@@ -8,7 +8,7 @@
 
   async function translateBatch(lines) {
     try {
-      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${SOURCE_LANGUAGE}&tl=${TARGET_LANGUAGE}&q=${encodeURIComponent(lines.join('\n'))}`;
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${SOURCE_LANGUAGE}&tl=${TARGET_LANGUAGE}&dt=t&q=${encodeURIComponent(lines.join('\n'))}`;
       const data = await (await fetch(url)).json();
       const results = data[0].reduce((s, c) => s + (c[0] ?? ''), '').split('\n');
       lines.forEach((o, i) => CACHE.set(o, results[i]?.trim() || o));
