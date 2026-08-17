@@ -1,6 +1,7 @@
 (function () {
   const CACHE = new Map(), INFLIGHT = new Set();
   let cueObs = null, bodyObs = null, currentRoot = null, active = false;
+  let prefetchedTrack = null;
 
   async function translateBatch(lines) {
     try {
@@ -11,31 +12,68 @@
     } catch (e) {}
   }
 
-  function extractCaptions() {
-    const el = document.getElementById('__NEXT_DATA__');
-    if (!el) return [];
+  async function prefetchFromTrack() {
+    const track = document.querySelector('video track[kind="subtitles"]');
+    if (!track?.src || track.src === prefetchedTrack) return;
+    prefetchedTrack = track.src;
+
     try {
-      const q = JSON.parse(el.textContent)?.props?.pageProps?.trpcState?.json?.queries ?? [];
+      const text = await (await fetch(track.src)).text();
+      const lines = [...new Set(
+        text.split('\n')
+          .map(l => l.trim())
+          .filter(l => l && !l.startsWith('WEBVTT') && !l.startsWith('NOTE')
+                    && !/^\d+$/.test(l) && !/^\d{2}:\d{2}/.test(l) && !l.startsWith('X-'))
+          .map(l => l.replace(/<[^>]+>/g, '').replace(/\n+/g, ' ').trim())
+          .filter(Boolean)
+      )];
+      if (!lines.length) return;
+      const B = 10;
+      const batches = [];
+      for (let i = 0; i < lines.length; i += B) batches.push(lines.slice(i, i + B));
+      await Promise.allSettled(batches.map(translateBatch));
+    } catch (e) {}
+  }
+
+  async function prefetchFromNextData() {
+    try {
+      const q = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent || '{}')
+        ?.props?.pageProps?.trpcState?.json?.queries ?? [];
       for (const e of q) {
         const c = e?.state?.data?.captions;
-        if (Array.isArray(c) && c.length)
-          return [...new Set(c.map(x => x.text.replace(/\n+/g, ' ').trim()).filter(Boolean))];
+        if (Array.isArray(c) && c.length) {
+          const lines = [...new Set(c.map(x => x.text.replace(/\n+/g, ' ').trim()).filter(Boolean))];
+          const B = 10, batches = [];
+          for (let i = 0; i < lines.length; i += B) batches.push(lines.slice(i, i + B));
+          await Promise.allSettled(batches.map(translateBatch));
+          return;
+        }
       }
     } catch (e) {}
-    return [];
-  }
+  }  
 
   function applyCue(c) {
     const s = c.textContent.trim().replace(/\n+/g, ' ');
     if (!s || s === c._pt) return;
-    if (CACHE.has(s)) { c.textContent = CACHE.get(s); c._pt = CACHE.get(s); return; }
+
+    if (CACHE.has(s)) {
+      c.textContent = CACHE.get(s);
+      c._pt = CACHE.get(s);
+      return;
+    }
+
+    c.style.visibility = 'hidden';
     if (INFLIGHT.has(s)) return;
     INFLIGHT.add(s);
     translateBatch([s]).then(() => {
       INFLIGHT.delete(s);
       document.querySelectorAll('[data-part="cue"]').forEach(el => {
         const t = el.textContent.trim().replace(/\n+/g, ' ');
-        if (t === s && CACHE.has(s)) { el.textContent = CACHE.get(s); el._pt = CACHE.get(s); }
+        if (t === s && CACHE.has(s)) {
+          el.textContent = CACHE.get(s);
+          el._pt = CACHE.get(s);
+          el.style.visibility = '';
+        }
       });
     });
   }
@@ -57,30 +95,34 @@
     root.querySelectorAll('[data-part="cue"]').forEach(applyCue);
   }
 
+  function watchForTrackChanges() {
+    new MutationObserver(() => {
+      const track = document.querySelector('video track[kind="subtitles"]');
+      if (track?.src && track.src !== prefetchedTrack) {
+        prefetchedTrack = track.src;
+        prefetchFromTrack();
+      }
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+  }
+
   async function activate() {
     if (active) return;
     active = true;
 
+    await Promise.allSettled([prefetchFromTrack(), prefetchFromNextData()]);
+
     const root = document.querySelector('.vds-captions');
     if (!root) { console.warn('[PT-BR] .vds-captions não encontrado'); return; }
-
-    const texts = extractCaptions();
-    if (texts.length) {
-      const B = 10, batches = [];
-      for (let i = 0; i < texts.length; i += B) batches.push(texts.slice(i, i + B));
-      await Promise.allSettled(batches.map(translateBatch));
-    }
-
     attachObserver(root);
 
-    // Reconecta quando o player é recriado (troca de vídeo)
     bodyObs = new MutationObserver(() => {
       const r = document.querySelector('.vds-captions');
-      if (r && r !== currentRoot) attachObserver(r);
+      if (r && r !== currentRoot) {
+        prefetchFromTrack().then(() => attachObserver(r));
+      }
     });
     bodyObs.observe(document.body, { childList: true, subtree: true });
 
-    // Detecta navegação SPA
     let lastUrl = location.href;
     function onNav() {
       if (location.href === lastUrl) return;
@@ -94,6 +136,7 @@
     });
     window.addEventListener('popstate', onNav);
 
+    watchForTrackChanges();
     console.log('[PT-BR Caption Translator] ativado ✓');
   }
 
@@ -105,16 +148,15 @@
     cueObs = null;
     bodyObs = null;
     currentRoot = null;
+    prefetchedTrack = null;
 
-    // Restaura textos originais que estiverem visíveis
     document.querySelectorAll('[data-part="cue"]').forEach(c => {
+      c.style.visibility = '';
       if (c._pt) { c.textContent = c._pt; c._pt = null; }
     });
-
     console.log('[PT-BR Caption Translator] desativado');
   }
 
-  // Escuta mensagens do popup
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.action === 'activate') {
       activate().then(() => sendResponse({ ok: true }));

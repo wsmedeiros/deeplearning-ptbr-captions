@@ -7,11 +7,10 @@ function setUI(active) {
   card.className = 'status-card ' + (active ? 'on' : 'off');
   statusText.textContent = active ? 'Ativo' : 'Desativado';
   statusSub.textContent = active
-    ? 'Legendas traduzidas para PT-BR'
+    ? 'Legendas em português (pt-BR)'
     : 'Clique para ativar a tradução';
 }
 
-// Lê estado atual do content script
 chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
   if (!tab) return;
   chrome.tabs.sendMessage(tab.id, { action: 'getStatus' }, (res) => {
@@ -20,7 +19,7 @@ chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
   });
 });
 
-// Toggle ao clicar
+
 toggleBtn.addEventListener('click', () => {
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
     if (!tab) return;
